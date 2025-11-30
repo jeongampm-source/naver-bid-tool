@@ -589,6 +589,10 @@ class NaverBidSchedulerGUI(QWidget):
             if adg and (pc or mo):
                 tasks.append((adg, pc, mo))
         acc = sch.get("account", {})
+        required = [acc.get("base_url"), acc.get("api_key"), acc.get("secret_key"), acc.get("customer_id")]
+        if not all(required):
+            self.log("✖ 스케줄 계정 정보가 완전하지 않아 실행을 건너뜁니다.")
+            return
         api = NaverAdApi(
             acc.get("base_url", "https://api.naver.com"),
             acc.get("api_key", ""),
@@ -603,21 +607,50 @@ class NaverBidSchedulerGUI(QWidget):
         return f"[{sch['day']} {sch['time']}] ({acc_name}) {sch['csv']}"
 
     def load_schedules(self):
+        updated = False
         try:
             with open(self.schedules_file, "r", encoding="utf-8") as f:
                 self.schedules = json.load(f)
         except Exception:
             self.schedules = []
 
+        def ensure_account_fields(sch):
+            acc = sch.get("account") or {}
+            if not acc:
+                acc = {
+                    "name": "현재 입력값",
+                    "base_url": self.base_url_edit.text(),
+                    "api_key": self.api_key_edit.text(),
+                    "secret_key": self.secret_key_edit.text(),
+                    "customer_id": self.customer_id_edit.text(),
+                }
+                sch["account"] = acc
+                return True
+
+            changed = False
+            for key in ("base_url", "api_key", "secret_key", "customer_id"):
+                if key not in acc:
+                    acc[key] = ""
+                    changed = True
+            if "name" not in acc:
+                acc["name"] = ""
+                changed = True
+            return changed
+
         self.tab3_list.blockSignals(True)
         self.tab3_list.clear()
         for sch in self.schedules:
+            if ensure_account_fields(sch):
+                updated = True
             item = QListWidgetItem(self.format_schedule_label(sch))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if sch.get("enabled", True) else Qt.Unchecked)
             item.setData(Qt.UserRole, sch)
             self.tab3_list.addItem(item)
         self.tab3_list.blockSignals(False)
+
+        if updated:
+            self.save_schedules()
 
     def save_schedules(self):
         with open(self.schedules_file, "w", encoding="utf-8") as f:
