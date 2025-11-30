@@ -136,9 +136,11 @@ class NaverBidSchedulerGUI(QWidget):
 
         self.accounts = {}
         self.accounts_file = "accounts.json"
+        self.schedules_file = "schedules.json"
 
         self.init_ui()
         self.load_accounts()
+        self.load_schedules()
         self.timer.start()
 
     def init_ui(self):
@@ -274,19 +276,23 @@ class NaverBidSchedulerGUI(QWidget):
         grid.addWidget(self.tab3_csv_label, 0, 1)
         grid.addWidget(btn_csv, 0, 2)
 
-        grid.addWidget(QLabel("요일"), 1, 0)
+        grid.addWidget(QLabel("계정 선택"), 1, 0)
+        self.tab3_account_combo = QComboBox()
+        grid.addWidget(self.tab3_account_combo, 1, 1, 1, 2)
+
+        grid.addWidget(QLabel("요일"), 2, 0)
         self.tab3_day = QComboBox()
         self.tab3_day.addItems(["평일", "주말", "월", "화", "수", "목", "금", "토", "일"])
-        grid.addWidget(self.tab3_day, 1, 1)
+        grid.addWidget(self.tab3_day, 2, 1)
 
-        grid.addWidget(QLabel("시간(HH:MM)"), 2, 0)
+        grid.addWidget(QLabel("시간(HH:MM)"), 3, 0)
         self.tab3_time = QLineEdit()
         self.tab3_time.setPlaceholderText("예: 09:00")
-        grid.addWidget(self.tab3_time, 2, 1)
+        grid.addWidget(self.tab3_time, 3, 1)
 
         btn_add = QPushButton("스케줄 추가")
         btn_add.clicked.connect(self.add_schedule)
-        grid.addWidget(btn_add, 3, 0, 1, 3)
+        grid.addWidget(btn_add, 4, 0, 1, 3)
 
         g.setLayout(grid)
         v.addWidget(g)
@@ -294,6 +300,7 @@ class NaverBidSchedulerGUI(QWidget):
         g2 = QGroupBox("등록된 스케줄")
         v2 = QVBoxLayout()
         self.tab3_list = QListWidget()
+        self.tab3_list.itemChanged.connect(self.toggle_schedule_state)
         v2.addWidget(self.tab3_list)
 
         btn_del = QPushButton("선택 스케줄 삭제")
@@ -333,6 +340,7 @@ class NaverBidSchedulerGUI(QWidget):
         self.load_accounts()
         self.account_combo.setCurrentText(name)
         self.log(f"계정 '{name}' 저장됨")
+        self.refresh_schedule_account_combo()
 
     def delete_account(self):
         name = self.account_combo.currentText()
@@ -353,6 +361,16 @@ class NaverBidSchedulerGUI(QWidget):
         self.account_combo.addItem("새 계정 (직접 입력)")
         for name in self.accounts.keys():
             self.account_combo.addItem(name)
+        self.refresh_schedule_account_combo()
+
+    def refresh_schedule_account_combo(self):
+        current = self.tab3_account_combo.currentText() if hasattr(self, "tab3_account_combo") else None
+        self.tab3_account_combo.clear()
+        self.tab3_account_combo.addItem("현재 입력값")
+        for name in self.accounts.keys():
+            self.tab3_account_combo.addItem(name)
+        if current:
+            self.tab3_account_combo.setCurrentText(current)
 
     def select_account(self, idx):
         if idx <= 0:
@@ -464,13 +482,41 @@ class NaverBidSchedulerGUI(QWidget):
         day = self.tab3_day.currentText()
         csv_path = self.tab3_selected_csv
 
+        acc_name = self.tab3_account_combo.currentText()
+        if acc_name and acc_name != "현재 입력값":
+            acc_data = self.accounts.get(acc_name)
+            if not acc_data:
+                QMessageBox.warning(self, "오류", "선택한 계정 정보를 찾을 수 없습니다.")
+                return
+        else:
+            acc_data = {
+                "base_url": self.base_url_edit.text(),
+                "api_key": self.api_key_edit.text(),
+                "secret_key": self.secret_key_edit.text(),
+                "customer_id": self.customer_id_edit.text(),
+            }
+            acc_name = "현재 입력값"
+
+        for k, v in acc_data.items():
+            if not v:
+                QMessageBox.warning(self, "오류", "계정 정보가 모두 입력되어야 합니다.")
+                return
+
         sch = {
             "csv": csv_path,
             "day": day,
-            "time": time_txt
+            "time": time_txt,
+            "enabled": True,
+            "account": {
+                "name": acc_name,
+                "base_url": acc_data.get("base_url", ""),
+                "api_key": acc_data.get("api_key", ""),
+                "secret_key": acc_data.get("secret_key", ""),
+                "customer_id": acc_data.get("customer_id", ""),
+            },
         }
 
-        item = QListWidgetItem(f"[{day} {time_txt}] {csv_path}")
+        item = QListWidgetItem(self.format_schedule_label(sch))
         item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
         item.setCheckState(Qt.Checked)
         item.setData(Qt.UserRole, sch)
@@ -478,6 +524,7 @@ class NaverBidSchedulerGUI(QWidget):
         self.tab3_list.addItem(item)
         self.schedules.append(sch)
         self.log(f"스케줄 추가됨 → {day} {time_txt}")
+        self.save_schedules()
 
     def delete_schedule(self):
         row = self.tab3_list.currentRow()
@@ -486,6 +533,7 @@ class NaverBidSchedulerGUI(QWidget):
         self.tab3_list.takeItem(row)
         del self.schedules[row]
         self.log("스케줄 삭제됨")
+        self.save_schedules()
 
     def start_scheduler(self):
         self.schedule_enabled = True
@@ -540,9 +588,46 @@ class NaverBidSchedulerGUI(QWidget):
             mo = int(mo) if mo else None
             if adg and (pc or mo):
                 tasks.append((adg, pc, mo))
-        api = self.build_api()
+        acc = sch.get("account", {})
+        api = NaverAdApi(
+            acc.get("base_url", "https://api.naver.com"),
+            acc.get("api_key", ""),
+            acc.get("secret_key", ""),
+            str(acc.get("customer_id", "")),
+        )
         threads = int(self.thread_tab1.currentText())
         self.start_worker(api, tasks, threads)
+
+    def format_schedule_label(self, sch):
+        acc_name = sch.get("account", {}).get("name", "")
+        return f"[{sch['day']} {sch['time']}] ({acc_name}) {sch['csv']}"
+
+    def load_schedules(self):
+        try:
+            with open(self.schedules_file, "r", encoding="utf-8") as f:
+                self.schedules = json.load(f)
+        except Exception:
+            self.schedules = []
+
+        self.tab3_list.blockSignals(True)
+        self.tab3_list.clear()
+        for sch in self.schedules:
+            item = QListWidgetItem(self.format_schedule_label(sch))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if sch.get("enabled", True) else Qt.Unchecked)
+            item.setData(Qt.UserRole, sch)
+            self.tab3_list.addItem(item)
+        self.tab3_list.blockSignals(False)
+
+    def save_schedules(self):
+        with open(self.schedules_file, "w", encoding="utf-8") as f:
+            json.dump(self.schedules, f, ensure_ascii=False, indent=2)
+
+    def toggle_schedule_state(self, item):
+        idx = self.tab3_list.row(item)
+        if 0 <= idx < len(self.schedules):
+            self.schedules[idx]["enabled"] = item.checkState() == Qt.Checked
+            self.save_schedules()
 
 def main():
     app = QApplication(sys.argv)
